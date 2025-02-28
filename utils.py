@@ -3,11 +3,11 @@ import numpy as np
 
 def calculate_simulated_metrics(sim_df):
     """
-    Função de utilidade que, dado um DataFrame de simulações (num_days x num_simulations),
-    retorna um DataFrame com as métricas de Sharpe, Sortino, Max Drawdown, VaR e CVaR 
-    para cada coluna (simulação).
+    Utility function that, given a DataFrame of simulations (num_days x num_simulations),
+    returns a DataFrame with Sharpe, Sortino, Max Drawdown, VaR, and CVaR metrics 
+    for each column (simulation).
     """
-    ret_ = sim_df.pct_change().dropna(how='all')  # retornos diários
+    ret_ = sim_df.pct_change().dropna(how='all')  # daily returns
     sharpe_ = {}
     sortino_ = {}
     mdd_ = {}
@@ -46,7 +46,7 @@ def calculate_simulated_metrics(sim_df):
         dd = (cum / peak) - 1
         mdd_[col] = dd.min()
 
-        # VaR e CVaR
+        # VaR and CVaR
         q95 = series.quantile(0.05)
         var_[col] = q95
         in_tail = series[series <= q95]

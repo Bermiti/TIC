@@ -4,8 +4,7 @@ import logging
 from datetime import datetime, timedelta
 import yfinance as yf
 from tqdm import tqdm
-# If you prefer, remove tqdm if you don't want the progress bar
-
+#
 from ClassStock import Stock
 
 class Portfolio:
