@@ -1,0 +1,19 @@
+2025-02-28 13:33:47,144 ERROR:Could not read the Stocks worksheet: [Errno 13] Permission denied: 'C:\\Users\\Utilizador\\OneDrive - Universidade de Lisboa\\TICRiskAnalysis\\Input\\input.xlsx'
+2025-02-28 13:34:21,896 ERROR:Error processing transaction row: {'Date': Timestamp('2023-01-15 00:00:00'), 'Symbol': 'AAPL', 'Type': 'buy', 'Price': 100.0, 'Quantity': 50}, e=unconverted data remains:  00:00:00
+2025-02-28 13:34:21,896 ERROR:Error processing transaction row: {'Date': Timestamp('2023-02-10 00:00:00'), 'Symbol': 'MSFT', 'Type': 'buy', 'Price': 100.0, 'Quantity': 30}, e=unconverted data remains:  00:00:00
+2025-02-28 13:34:21,911 ERROR:Error processing transaction row: {'Date': Timestamp('2023-03-20 00:00:00'), 'Symbol': 'GOOGL', 'Type': 'buy', 'Price': 200.0, 'Quantity': 20}, e=unconverted data remains:  00:00:00
+2025-02-28 13:34:21,911 ERROR:Error processing transaction row: {'Date': Timestamp('2023-04-15 00:00:00'), 'Symbol': 'AAPL', 'Type': 'sell ', 'Price': 110.0, 'Quantity': 10}, e=Transaction type must be 'buy' or 'sell'.
+2025-02-28 13:34:21,911 ERROR:Error processing transaction row: {'Date': Timestamp('2023-05-10 00:00:00'), 'Symbol': 'AMZN', 'Type': 'buy', 'Price': 200.0, 'Quantity': 10}, e=unconverted data remains:  00:00:00
+2025-02-28 13:34:21,911 ERROR:Error processing transaction row: {'Date': Timestamp('2023-06-18 00:00:00'), 'Symbol': 'TSLA', 'Type': 'buy', 'Price': 166.67, 'Quantity': 15}, e=unconverted data remains:  00:00:00
+2025-02-28 13:34:21,911 ERROR:Error processing transaction row: {'Date': Timestamp('2023-07-25 00:00:00'), 'Symbol': 'AAPL', 'Type': 'buy', 'Price': 110.0, 'Quantity': 15}, e=unconverted data remains:  00:00:00
+2025-02-28 13:34:53,072 WARNING:No transaction_log or it is empty.
+2025-02-28 13:34:53,072 WARNING:Dynamic time series is empty, fallback to buy-and-hold.
+2025-02-28 13:42:21,903 ERROR:Error processing transaction row: {'Date': Timestamp('2023-01-15 00:00:00'), 'Symbol': 'AAPL', 'Type': 'buy', 'Price': 100.0, 'Quantity': 50}, e=unconverted data remains:  00:00:00
+2025-02-28 13:42:21,904 ERROR:Error processing transaction row: {'Date': Timestamp('2023-02-10 00:00:00'), 'Symbol': 'MSFT', 'Type': 'buy', 'Price': 100.0, 'Quantity': 30}, e=unconverted data remains:  00:00:00
+2025-02-28 13:42:21,904 ERROR:Error processing transaction row: {'Date': Timestamp('2023-03-20 00:00:00'), 'Symbol': 'GOOGL', 'Type': 'buy', 'Price': 200.0, 'Quantity': 20}, e=unconverted data remains:  00:00:00
+2025-02-28 13:42:21,904 ERROR:Error processing transaction row: {'Date': Timestamp('2023-04-15 00:00:00'), 'Symbol': 'AAPL', 'Type': 'sell ', 'Price': 110.0, 'Quantity': 10}, e=Transaction type must be 'buy' or 'sell'.
+2025-02-28 13:42:21,905 ERROR:Error processing transaction row: {'Date': Timestamp('2023-05-10 00:00:00'), 'Symbol': 'AMZN', 'Type': 'buy', 'Price': 200.0, 'Quantity': 10}, e=unconverted data remains:  00:00:00
+2025-02-28 13:42:21,905 ERROR:Error processing transaction row: {'Date': Timestamp('2023-06-18 00:00:00'), 'Symbol': 'TSLA', 'Type': 'buy', 'Price': 166.67, 'Quantity': 15}, e=unconverted data remains:  00:00:00
+2025-02-28 13:42:21,906 ERROR:Error processing transaction row: {'Date': Timestamp('2023-07-25 00:00:00'), 'Symbol': 'AAPL', 'Type': 'buy', 'Price': 110.0, 'Quantity': 15}, e=unconverted data remains:  00:00:00
+2025-02-28 13:42:52,615 WARNING:No transaction_log or it is empty.
+2025-02-28 13:42:52,615 WARNING:Dynamic time series is empty, fallback to buy-and-hold.
