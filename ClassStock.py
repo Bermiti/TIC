@@ -4,7 +4,7 @@ import yfinance as yf
 import logging
 from datetime import datetime, timedelta
 
-# git test
+# git test branch
 
 class Stock:
     """
