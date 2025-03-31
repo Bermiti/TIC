@@ -1,54 +1,57 @@
-import numpy as np
-import pandas as pd
+#ClassStock.py
 import yfinance as yf
 import logging
+import numpy as np
+import pandas as pd
 from datetime import datetime, timedelta
-
-# git test branch
 
 class Stock:
     """
-    Represents an individual stock in the portfolio.
+    Represents a single stock in the portfolio.
     """
 
-    def __init__(self, symbol, invested, value, risk_free_rate):
+    def __init__(self, symbol, risk_free_rate=0.0, investment=0.0, quantity=0.0):
         self.symbol = symbol
         self.RF = risk_free_rate
-        self.value = value            # current monetary value = quantity * price
-        self.investment = invested    # amount initially invested
-        self.data = None
-        self.stock = None
-        self.simulated_prices = None
-        self.adjusted_beta = None
-        self.adjusted_volatility = None
-        self.adjusted_return = None
+        # 'investment' can represent the total cost of all buy transactions
+        self.investment = investment
+        # 'value' will be derived from quantity * last market price
+        self.value = 0.0
+        # 'quantity' is the net shares held (buys - sells)
+        self.quantity = quantity
 
-        # Estimated number of shares based on "value / last price"
-        self.quantity = 0.0
+        # Data (DataFrame from yfinance)
+        self.data = None
+        # Ticker object from yfinance
+        self.stock = None
+
+        # Adjusted overrides (optional for custom simulations)
+        self.adjusted_return = None
+        self.adjusted_volatility = None
+        self.adjusted_beta = None
+
+        # For storing any Monte Carlo results if needed
+        self.simulated_prices = None
 
     def getTicker(self):
-        """
-        Returns the yfinance Ticker object, or creates it if it doesn't exist yet.
-        """
         if self.stock is None:
             self.stock = yf.Ticker(self.symbol)
         return self.stock
 
-    def getInvestment(self):
-        return self.investment
-
-    def getAmount(self):
-        return self.value
-
     def get_data(self, start_date=None, end_date=None):
         """
-        Downloads the price data via yfinance and stores it in self.data.
+        Downloads price data via yfinance, stores in self.data.
+        By default, if no dates are given, it fetches ~1 year of data.
         """
         if self.data is None:
             if end_date is None:
-                end_date = datetime.today()
+                # Provide a more realistic fallback if your system date is in the future:
+                end_date = pd.Timestamp.today().floor('D')
+                # e.g., end_date = min(pd.Timestamp.today(), pd.Timestamp("2024-12-31"))
+
             if start_date is None:
                 start_date = end_date - timedelta(days=365)
+
             try:
                 df = yf.download(
                     self.symbol,
@@ -56,13 +59,12 @@ class Stock:
                     end=end_date,
                     interval='1d',
                     progress=False,
-                    auto_adjust=False  # Keeps the 'Adj Close' column
+                    auto_adjust=False
                 )
                 if df.empty:
                     logging.warning(f"No data returned for {self.symbol}.")
                     self.data = pd.DataFrame()
                 else:
-                    # In case there is a MultiIndex in columns, normalize it
                     if isinstance(df.columns, pd.MultiIndex):
                         df.columns = df.columns.get_level_values(0)
                     self.data = df
@@ -72,9 +74,6 @@ class Stock:
         return self.data
 
     def getInfo(self):
-        """
-        Returns the info dictionary from the ticker in Yahoo Finance.
-        """
         try:
             return self.getTicker().info
         except Exception as e:
@@ -83,8 +82,8 @@ class Stock:
 
     def getBeta(self):
         """
-        If an adjusted beta has been set, returns it. Otherwise,
-        attempts to fetch it from the .info property in yfinance.
+        If an adjusted beta has been manually set, return that.
+        Otherwise attempt to fetch from yfinance 'info'.
         """
         if self.adjusted_beta is not None:
             return self.adjusted_beta
@@ -96,23 +95,47 @@ class Stock:
 
     def getClose(self):
         """
-        Returns a Series of 'Adj Close', if available.
+        Returns the 'Adj Close' column as a Series.
         """
         if self.data is None:
             self.get_data()
         if 'Adj Close' in self.data.columns:
             adj_close = self.data['Adj Close']
             if isinstance(adj_close, pd.DataFrame):
-                # If for some reason it comes as multi-column, grab the first
+                # If for some reason it comes as a multi-column DataFrame,
+                # flatten to a Series
                 adj_close = adj_close.iloc[:, 0]
             return adj_close
         else:
             logging.warning(f"No 'Adj Close' for {self.symbol}.")
             return pd.Series(dtype=float)
 
+    def getPriceOnDate(self, date):
+        """
+        Fetches the 'Adj Close' price for this stock on the specific 'date'.
+        If the exact date is not in the index, we might do a forward/back fill.
+        """
+        c = self.getClose()
+        if c.empty:
+            return np.nan
+
+        # Ensure the index is a DatetimeIndex
+        if not isinstance(c.index, pd.DatetimeIndex):
+            c.index = pd.to_datetime(c.index)
+
+        if date in c.index:
+            return float(c.loc[date])
+        else:
+            # fallback: find the closest previous valid date
+            idx = c.index.asof(date)
+            if pd.isna(idx):
+                # no earlier date => fallback to earliest price
+                idx = c.index[0]
+            return float(c.loc[idx])
+
     def getReturns(self):
         """
-        Returns the daily returns (pct_change) based on 'Adj Close'.
+        Daily returns (percentage change) based on 'Adj Close'.
         """
         c = self.getClose()
         if c.empty or len(c) < 2:
@@ -120,21 +143,15 @@ class Stock:
         return c.pct_change()
 
     def setAdjustedReturn(self, expected_return):
-        """
-        Manually sets an (annual) expected return for custom simulations.
-        """
         self.adjusted_return = expected_return
 
     def setAdjustedVolatility(self, volatility):
-        """
-        Manually sets an (annual) volatility for custom simulations.
-        """
         self.adjusted_volatility = volatility
 
     def getAdjustedReturns(self):
         """
-        If (adjusted_return, adjusted_volatility) are defined, it generates synthetic returns.
-        Otherwise, uses the historical returns.
+        If (adjusted_return, adjusted_volatility) are set, generate synthetic returns;
+        otherwise use historical returns.
         """
         r = self.getReturns().dropna()
         if r.empty:
@@ -142,7 +159,6 @@ class Stock:
 
         if (self.adjusted_return is not None) and (self.adjusted_volatility is not None):
             rng = np.random.default_rng(42)
-            # convert annual to daily
             daily_mean = self.adjusted_return / 252
             daily_std = self.adjusted_volatility / np.sqrt(252)
             synthetic = rng.normal(loc=daily_mean, scale=daily_std, size=len(r))
@@ -151,33 +167,21 @@ class Stock:
             return r
 
     def getTotalReturn(self):
-        """
-        (LastPrice - FirstPrice) / FirstPrice over the loaded period.
-        """
         c = self.getClose()
         if len(c) < 2:
             return np.nan
         return (c.iloc[-1] - c.iloc[0]) / c.iloc[0]
 
     def annualToDaily(self):
-        """
-        Converts annual interest rate to daily (approx for 252 trading days).
-        """
-        return (1 + self.RF) ** (1/252) - 1
+        return (1 + self.RF)**(1/252) - 1
 
     def getExcessReturns(self):
-        """
-        Daily return - (daily risk-free rate).
-        """
         r = self.getAdjustedReturns().dropna()
         if r.empty:
             return pd.Series(dtype=float)
         return r - self.annualToDaily()
 
     def getSharpeRatio(self):
-        """
-        Annualized Sharpe Ratio for this stock, using adjusted returns.
-        """
         er = self.getExcessReturns().dropna()
         std_dev = er.std()
         if std_dev == 0 or np.isnan(std_dev):
@@ -185,18 +189,15 @@ class Stock:
         return er.mean() / std_dev * np.sqrt(252)
 
     def getSortinoRatio(self):
-        """
-        Annualized Sortino Ratio for this stock, using adjusted returns.
-        """
         er = self.getExcessReturns().dropna()
-        negative_part = er[er < 0]
-        if negative_part.empty or negative_part.std() == 0:
+        neg = er[er < 0]
+        if neg.empty or neg.std() == 0:
             return np.nan
-        return er.mean() / negative_part.std() * np.sqrt(252)
+        return er.mean() / neg.std() * np.sqrt(252)
 
     def monteCarloSimulation(self, num_simulations=1000, num_days=252):
         """
-        Price simulation (GBM) for the individual stock.
+        GBM-based price simulation for the stock using its historical mean and std dev of returns.
         """
         r = self.getAdjustedReturns()
         if r.empty:

@@ -1,81 +1,104 @@
+# main.py
+
 import sys
 import logging
 import pandas as pd
 import csv
-from openpyxl import Workbook
-from openpyxl.styles import numbers
-import openpyxl
 import numpy as np
 from datetime import datetime
-
 from ClassStock import Stock
 from ClassPortfolio import Portfolio
 from ClassTransactions import Transactions
 from utils import calculate_simulated_metrics
 
+# NOTE: filemode='a' appends logs each run, 'w' overwrites
 logging.basicConfig(
     filename='portfolioanalysis.log',
+    filemode='w',
     level=logging.INFO,
     format='%(asctime)s %(levelname)s:%(message)s'
 )
 
+import os
+from pathlib import Path
+
 def main():
     """
     Main script that:
-      1) Reads the Stocks and Transactions worksheets from an Excel input file.
-      2) Creates the Portfolio.
-      3) Computes metrics and runs Monte Carlo simulations for:
-         - Portfolio
-         - Each Stock
-         - Benchmark (^GSPC)
-      4) Exports results (Excel and CSVs), including a CSV with returns (all stocks + Portfolio + Benchmark).
+      1) Reads ONLY the Transactions sheet with [Date, Symbol, Type, Quantity]
+      2) Dynamically finds the price from the Stock data
+      3) Builds a portfolio from those transactions
+      4) Computes metrics, runs Monte Carlo, and exports results
     """
 
-    # Input and output paths
-    excel_file_path = r"C:\Users\Utilizador\OneDrive - Universidade de Lisboa\TICRiskAnalysis\Input\input.xlsx"
-    output_file_path = r"C:\Users\Utilizador\OneDrive - Universidade de Lisboa\TICRiskAnalysis\Output\PortfolioOutput.xlsx"
+    # Detect the Operating System
+    is_windows = os.name == "nt"
 
-    simulations_csv_path = r"C:\Users\Utilizador\OneDrive - Universidade de Lisboa\TICRiskAnalysis\Output\MonteCarloSimulations.csv"
-    mc_metrics_csv_path = r"C:\Users\Utilizador\OneDrive - Universidade de Lisboa\TICRiskAnalysis\Output\MonteCarloMetrics.csv"
-    stock_returns_csv_path = r"C:\Users\Utilizador\OneDrive - Universidade de Lisboa\TICRiskAnalysis\Output\StockReturns.csv"
-    time_series_csv_path = r"C:\Users\Utilizador\OneDrive - Universidade de Lisboa\TICRiskAnalysis\Output\TimeSeriesData.csv"
+    # Get the script's directory dynamically
+    script_dir = Path(__file__).resolve().parent
 
+    # Set base directory (TICRiskAnalysis)
+    base_dir = script_dir.parent
+
+    # Define Input and Output paths dynamically
+    excel_file_path = base_dir / "Input" / "input.xlsx"
+    output_file_path = base_dir / "Output" / "PortfolioOutput.xlsx"
+
+    simulations_csv_path = base_dir / "Output" / "MonteCarloSimulations.csv"
+    mc_metrics_csv_path = base_dir / "Output" / "MonteCarloMetrics.csv"
+    stock_returns_csv_path = base_dir / "Output" / "StockReturns.csv"
+    time_series_csv_path = base_dir / "Output" / "TimeSeriesData.csv"
+
+    excel_file_path = str(excel_file_path)
+    output_file_path = str(output_file_path)
+    simulations_csv_path = str(simulations_csv_path)
+    mc_metrics_csv_path = str(mc_metrics_csv_path)
+    stock_returns_csv_path = str(stock_returns_csv_path)
+    time_series_csv_path = str(time_series_csv_path)
+
+    # Print debug information
+    print(f"Running on: {'Windows' if is_windows else 'macOS/Linux'}")
+
+    # Parameters
     risk_free_rate = 0.048
     initial_cash = 1_000_000.0
     num_simulations = 1000
     num_days = 252
 
-    # 1) Load Stocks
+    # Try reading the Transactions sheet
     try:
-        df_stocks = pd.read_excel(excel_file_path, sheet_name="Stocks")
+        df_tx = pd.read_excel(excel_file_path, sheet_name="Transactions")
     except Exception as e:
-        logging.error(f"Could not read the Stocks worksheet: {e}")
+        logging.error(f"Could not read Transactions sheet: {e}")
         sys.exit(1)
 
-    required_cols = ["Symbol","Invested","Value"]
-    if not all(x in df_stocks.columns for x in required_cols):
-        logging.error(f"Missing columns in Stocks worksheet. Required: {required_cols}")
+    required_cols = ["Date","Symbol","Type","Quantity"]
+    if not all(x in df_tx.columns for x in required_cols):
+        logging.error(f"Missing columns in Transactions. Required: {required_cols}")
         sys.exit(1)
 
+    # Sort transactions by date
+    df_tx.sort_values("Date", inplace=True)
+
+    # Identify earliest transaction date
+    earliest_tx_date = df_tx["Date"].min()
+
+    # We'll define a realistic end_date so we don't ask for future data from Yahoo
+    # For example, use today's date if it's truly valid, or set it to something known
+    today_system = pd.Timestamp.today().floor('D')
+    # If your system date is far in the future, you might want a fallback:
+    #   real_end_date = min(today_system, pd.Timestamp("2024-12-31"))
+    real_end_date = today_system
+
+    # Build stock objects for unique symbols, using earliest date as start_date
+    symbols = df_tx["Symbol"].unique().tolist()
     stocks = {}
-    for _, row in df_stocks.iterrows():
-        sym = row["Symbol"]
-        invested = float(str(row["Invested"]).replace(',','.'))
-        val = float(str(row["Value"]).replace(',','.'))
-        st = Stock(sym, invested=invested, value=val, risk_free_rate=risk_free_rate)
-        # Estimate number of shares
-        c = st.getClose()
-        if not c.empty:
-            last_price = c.iloc[-1]
-            if last_price > 0:
-                st.quantity = val / last_price
+    for sym in symbols:
+        st = Stock(symbol=sym, risk_free_rate=risk_free_rate, investment=0.0, quantity=0.0)
+        st.get_data(start_date=earliest_tx_date, end_date=real_end_date)
         stocks[sym] = st
 
-    # Create Benchmark
-    benchmark_symbol = "^GSPC"
-    benchmark_stock = Stock(benchmark_symbol, 0.0, 0.0, risk_free_rate)
-
-    # 2) Create Portfolio and load transactions
+    # Create the portfolio and load transactions
     portfolio = Portfolio(stocks=stocks, risk_free_rate=risk_free_rate, initial_cash=initial_cash)
     transactions = Transactions(portfolio)
     try:
@@ -83,7 +106,12 @@ def main():
     except Exception as e:
         logging.error(f"Error importing transactions: {e}")
 
-    # 3) Collect portfolio data
+    # Create a benchmark (optional)
+    benchmark_symbol = "^GSPC"
+    benchmark_stock = Stock(benchmark_symbol, risk_free_rate=risk_free_rate)
+    benchmark_stock.get_data(start_date=earliest_tx_date, end_date=real_end_date)
+
+    # Collect portfolio data
     try:
         detailed_df = portfolio.getDetailedStockData()
         summary_dict = portfolio.Summary()
@@ -99,43 +127,47 @@ def main():
         summary_dict = {}
         corr_long = pd.DataFrame()
 
-    # 4) Monte Carlo simulations
-    # 4.1) Portfolio
+    # Monte Carlo Simulations
+    # 1) Portfolio
     try:
         mc_df_portfolio = portfolio.monteCarloSimulation(num_simulations, num_days)
         mc_metrics_portfolio = portfolio.getSimulatedMetrics()
-        mc_metrics_portfolio["Asset"] = "Portfolio"
+        if not mc_metrics_portfolio.empty:
+            mc_metrics_portfolio["Asset"] = "Portfolio"
     except Exception as e:
         logging.error(f"Error in Portfolio MC: {e}")
         mc_df_portfolio = pd.DataFrame()
         mc_metrics_portfolio = pd.DataFrame()
 
-    # 4.2) Each stock
+    # 2) Each Stock
     stock_simulations = {}
     stock_metrics_all = []
     for symbol, st in portfolio.stocks.items():
         try:
             sim_df = st.monteCarloSimulation(num_simulations, num_days)
-            stock_simulations[symbol] = sim_df
-            df_metrics = calculate_simulated_metrics(sim_df)
-            df_metrics["Asset"] = symbol
-            stock_metrics_all.append(df_metrics)
+            if not sim_df.empty:
+                stock_simulations[symbol] = sim_df
+                df_metrics = calculate_simulated_metrics(sim_df)
+                df_metrics["Asset"] = symbol
+                stock_metrics_all.append(df_metrics)
         except Exception as e:
-            logging.error(f"Error in MC for stock={symbol}: {e}")
+            logging.error(f"Error in MC for {symbol}: {e}")
 
-    # 4.3) Benchmark
+    # 3) Benchmark
     try:
         bench_sim_df = benchmark_stock.monteCarloSimulation(num_simulations, num_days)
-        bench_metrics_df = calculate_simulated_metrics(bench_sim_df)
-        bench_metrics_df["Asset"] = "Benchmark"
+        if not bench_sim_df.empty:
+            bench_metrics_df = calculate_simulated_metrics(bench_sim_df)
+            bench_metrics_df["Asset"] = "Benchmark"
+        else:
+            bench_metrics_df = pd.DataFrame()
     except Exception as e:
         logging.error(f"Error in Benchmark MC: {e}")
         bench_sim_df = pd.DataFrame()
         bench_metrics_df = pd.DataFrame()
 
-    # Combine simulations into a single "long" DataFrame
+    # Combine all simulations in a "long" format
     sim_records = []
-
     def add_sim_records(sim_df, asset_name):
         for i in range(1, num_simulations+1):
             col = f"Simulation_{i}"
@@ -157,7 +189,7 @@ def main():
     else:
         mc_long_df = pd.DataFrame()
 
-    # Combine metrics as well
+    # Combine metrics
     all_sim_metrics = []
     if not mc_metrics_portfolio.empty:
         all_sim_metrics.append(mc_metrics_portfolio[[
@@ -166,7 +198,7 @@ def main():
     if stock_metrics_all:
         df_stock_metrics = pd.concat(stock_metrics_all, ignore_index=True)
         all_sim_metrics.append(df_stock_metrics)
-    if not bench_metrics_df.empty:
+    if not bench_sim_df.empty and not bench_metrics_df.empty:
         all_sim_metrics.append(bench_metrics_df)
 
     if all_sim_metrics:
@@ -174,34 +206,31 @@ def main():
     else:
         mc_metrics_full = pd.DataFrame()
 
-    # 5) Time series (Portfolio + Benchmark)
+    # Build time series for Portfolio + Benchmark
     try:
         dyn_df = portfolio.getDynamicTimeSeries(transactions.get_transaction_log(), by_stock=True)
-
         if dyn_df.empty:
-            logging.warning("Dynamic time series is empty, fallback to buy-and-hold.")
+            # fallback to simple buy-and-hold approach
             fallback_data = portfolio.getAdjClosePrices()
             if fallback_data.empty:
-                # no data
                 ts_data = pd.DataFrame()
                 ret_long = pd.DataFrame()
             else:
+                # add benchmark if available
                 bench_close = benchmark_stock.getClose()
                 if not bench_close.empty:
                     fallback_data["Benchmark"] = bench_close.reindex(fallback_data.index).fillna(method='ffill')
+                # add portfolio as a weighted sum (static)
                 fallback_data["Portfolio"] = portfolio.getPortfolioAdjustedClosePrices()
                 fallback_data.reset_index(inplace=True)
                 fallback_data.rename(columns={"index":"Date"}, inplace=True)
 
-                # ts_data - in long format
                 ts_data = pd.melt(
                     fallback_data,
                     id_vars=["Date"],
                     var_name="Asset",
                     value_name="Value"
                 )
-
-                # daily returns
                 pivot_ts = fallback_data.set_index("Date")
                 daily_returns = pivot_ts.pct_change().dropna(how='all').reset_index()
                 ret_long = pd.melt(
@@ -211,9 +240,8 @@ def main():
                     value_name="DailyReturn"
                 )
                 ret_long.dropna(subset=["DailyReturn"], inplace=True)
-
         else:
-            # we have dates and portfolio values
+            # We have a daily series from transaction-based approach
             bench_close = benchmark_stock.getClose()
             bench_close = bench_close.reindex(dyn_df["Date"]).fillna(method='ffill')
             bench_close.name = "Benchmark"
@@ -221,17 +249,16 @@ def main():
             ts_records = []
             for idx, row in dyn_df.iterrows():
                 date_ = row["Date"]
-
-                # per stock (if by_stock=True)
+                # for each stock column (if by_stock=True, we have them)
                 for col in dyn_df.columns:
                     if col in ["Date","Cash","PortfolioValue"]:
                         continue
                     ts_records.append({"Date": date_, "Asset": col, "Value": row[col]})
 
-                # total value of the Portfolio
+                # total portfolio
                 ts_records.append({"Date": date_, "Asset": "Portfolio", "Value": row["PortfolioValue"]})
 
-                # Benchmark
+                # benchmark
                 val_bench = bench_close.loc[date_] if date_ in bench_close.index else None
                 ts_records.append({"Date": date_, "Asset": "Benchmark", "Value": val_bench})
 
@@ -242,7 +269,12 @@ def main():
                 piv = ts_data.pivot(index="Date", columns="Asset", values="Value")
                 piv.sort_index(inplace=True)
                 daily_returns = piv.pct_change().dropna(how='all').reset_index()
-                ret_long = pd.melt(daily_returns, id_vars=["Date"], var_name="Asset", value_name="DailyReturn")
+                ret_long = pd.melt(
+                    daily_returns,
+                    id_vars=["Date"],
+                    var_name="Asset",
+                    value_name="DailyReturn"
+                )
                 ret_long.dropna(subset=["DailyReturn"], inplace=True)
 
     except Exception as e:
@@ -250,22 +282,29 @@ def main():
         ts_data = pd.DataFrame()
         ret_long = pd.DataFrame()
 
-    # 6) Export main data to Excel
+    # Export to Excel, ensuring at least 1 sheet is visible
     try:
         with pd.ExcelWriter(output_file_path, engine='openpyxl') as writer:
-            # DetailedStockData
+            wrote_sheet = False
+
             if not detailed_df.empty:
                 detailed_df.to_excel(writer, sheet_name="DetailedStockData", index=False)
+                wrote_sheet = True
 
-            # PortfolioSummary
             if summary_dict:
                 pd.DataFrame([summary_dict]).to_excel(writer, sheet_name="PortfolioSummary", index=False)
+                wrote_sheet = True
 
-            # CorrelationMatrix
             if not corr_long.empty:
                 corr_long.to_excel(writer, sheet_name="CorrelationMatrix", index=False)
+                wrote_sheet = True
 
-            # Numeric formatting (optional)
+            # If we never wrote anything, create a dummy sheet so the file is valid.
+            if not wrote_sheet:
+                dummy_df = pd.DataFrame({"Info": ["No portfolio data to show"]})
+                dummy_df.to_excel(writer, sheet_name="EmptyReport", index=False)
+
+            # Optionally format numeric cells
             workbook = writer.book
             for shtname in writer.sheets:
                 sht = writer.sheets[shtname]
@@ -278,29 +317,25 @@ def main():
     except Exception as e:
         logging.error(f"Error writing Excel: {e}")
 
-    # 7) Export CSVs
-    # Monte Carlo Simulations (all simulations in long format)
+    # Export CSVs
     try:
         mc_long_df.to_csv(simulations_csv_path, sep=';', decimal=',', index=False, quoting=csv.QUOTE_ALL)
         print(f"MC simulations saved at {simulations_csv_path}")
     except Exception as e:
         logging.error(f"Error writing simulations CSV: {e}")
 
-    # Monte Carlo Metrics
     try:
         mc_metrics_full.to_csv(mc_metrics_csv_path, sep=';', decimal=',', index=False, quoting=csv.QUOTE_ALL)
         print(f"MC metrics saved at {mc_metrics_csv_path}")
     except Exception as e:
         logging.error(f"Error writing MC metrics CSV: {e}")
 
-    # StockReturns (daily returns for each asset + Portfolio + Benchmark)
     try:
         ret_long.to_csv(stock_returns_csv_path, sep=';', decimal=',', index=False, quoting=csv.QUOTE_ALL)
-        print(f"Daily returns (StockReturns) saved at {stock_returns_csv_path}")
+        print(f"Daily returns saved at {stock_returns_csv_path}")
     except Exception as e:
         logging.error(f"Error writing returns CSV: {e}")
 
-    # TimeSeriesData (daily values in long format)
     try:
         ts_data.to_csv(time_series_csv_path, sep=';', decimal=',', index=False, quoting=csv.QUOTE_ALL)
         print(f"Time series saved at {time_series_csv_path}")

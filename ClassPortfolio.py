@@ -1,162 +1,181 @@
+# ClassPortfolio.py
+
 import numpy as np
 import pandas as pd
 import logging
-from datetime import datetime, timedelta
 import yfinance as yf
+from datetime import datetime, timedelta
 from tqdm import tqdm
-#
 from ClassStock import Stock
 
 class Portfolio:
     """
-    Represents a stock portfolio, computing risk metrics and allowing simulations.
+    Manages a collection of Stock objects and cash balance, 
+    computes risk metrics, and runs Monte Carlo simulations.
     """
 
     def __init__(self, stocks, risk_free_rate, initial_cash):
-        self.stocks = stocks  # dictionary: { "Symbol": Stock(...) }
+        """
+        :param stocks: dict of symbol -> Stock object
+        :param risk_free_rate: float, annual risk-free rate
+        :param initial_cash: float, total starting cash
+        """
+        self.stocks = stocks
         self.RF = risk_free_rate
-        self.cash_balance = initial_cash
+        self.cash_balance = initial_cash  # uninvested cash
+
+        # Attempt to compute weights based on each Stock's current value.
         self.weights = self.getWeights()
 
+        # Caches
         self.portfolio_returns = None
         self.portfolio_excess_returns = None
         self.market_close = None
         self.simulated_portfolio_values = None
         self.simulated_metrics = None
 
+        # Store dynamic TS here if you use getDynamicTimeSeries()
+        self._dynamic_ts = pd.DataFrame()
+
     def getWeights(self):
         """
-        Calculates the fraction of each stock in the total portfolio (based on self.stocks[sym].value).
+        Returns the fraction of each stock's value in the total (stock) portion
+        of the portfolio, ignoring uninvested cash.
         """
-        total_value = sum(st.getAmount() for st in self.stocks.values())
-        if total_value == 0:
-            logging.error("Total portfolio value is zero.")
-            raise ValueError("Total portfolio value is zero.")
-
+        total_val = sum(st.value for st in self.stocks.values())
+        if total_val == 0:
+            logging.warning("Portfolio has total (stock) value == 0; cannot compute weights.")
+            return {}
         w = {}
-        for symbol, st in self.stocks.items():
-            w[symbol] = st.getAmount() / total_value
+        for sym, st in self.stocks.items():
+            w[sym] = st.value / total_val
         return w
+
+    def updateWeights(self):
+        """
+        Recomputes portfolio weights (call after buy/sell).
+        """
+        self.weights = self.getWeights()
 
     def update_stock(self, symbol, quantity, price, increase=True):
         """
-        Updates the monetary position for a given asset (buy or sell).
+        Adjusts the stock's position (buy or sell), updates cash_balance, 
+        and recalculates the stock 'value' based on the last known or fallback price.
         """
-        if symbol not in self.stocks:
-            if not increase:
-                raise ValueError(f"Unable to sell {symbol} that is not in the portfolio.")
-            self.stocks[symbol] = Stock(symbol, invested=0.0, value=0.0, risk_free_rate=self.RF)
+        if symbol not in self.stocks and increase is False:
+            raise ValueError(f"Cannot sell {symbol} that is not in the portfolio.")
 
-        stock = self.stocks[symbol]
-        current_value = stock.getAmount()
+        if symbol not in self.stocks:
+            self.stocks[symbol] = Stock(symbol, risk_free_rate=self.RF, 
+                                        investment=0.0, quantity=0.0)
+
+        st = self.stocks[symbol]
+        trade_cost = quantity * price
 
         if increase:
-            # buy
-            stock.value = current_value + (quantity * price)
-            stock.investment += (quantity * price)
+            # Buy
+            if self.cash_balance < trade_cost:
+                raise ValueError("Insufficient cash to buy.")
+            self.cash_balance -= trade_cost
+            st.investment += trade_cost
+            st.quantity += quantity
         else:
-            # sell
-            if stock.value < (quantity * price):
-                raise ValueError(f"Insufficient value in {symbol} to sell.")
-            stock.value = current_value - (quantity * price)
-            if stock.value == 0:
-                del self.stocks[symbol]
+            # Sell
+            if st.quantity < quantity:
+                raise ValueError("Not enough quantity to sell.")
+            self.cash_balance += trade_cost
+            st.quantity -= quantity
 
-        # recalculate weights
-        if len(self.stocks) > 0:
-            self.weights = self.getWeights()
+        # Update 'value' based on the last or fallback price
+        c = st.getClose()
+        if not c.empty:
+            st.value = st.quantity * c.iloc[-1]
         else:
-            self.weights = {}
+            st.value = st.quantity * price
 
-        logging.info(f"Update of {symbol}: qty={quantity}, price={price}, increase={increase}")
+        self.updateWeights()
 
     def has_stock(self, symbol, quantity):
         """
-        Checks if the portfolio has sufficient value/quantity to sell X shares,
-        based on the last price (approx).
+        Checks if we hold 'quantity' or more shares of 'symbol'.
         """
         if symbol not in self.stocks:
             return False
-        st = self.stocks[symbol]
-        c = st.getClose()
-        last_price = c.iloc[-1] if not c.empty else 0
-        return st.getAmount() >= (quantity * last_price)
+        return self.stocks[symbol].quantity >= quantity
 
     def getAdjClosePrices(self):
         """
-        DataFrame with 'Adj Close' for each stock, columns=symbol, index=date.
-        """
-        data = pd.DataFrame()
-        for st in self.stocks.values():
-            c = st.getClose()
-            if not c.empty:
-                data[st.symbol] = c
-            else:
-                logging.warning(f"No closing prices for {st.symbol}.")
-        return data
-
-    def getPortfolioAdjustedClosePrices(self):
-        """
-        Weighted sum of 'Adj Close' to simulate buy-and-hold.
-        """
-        adj_close = self.getAdjClosePrices()
-        if adj_close.empty:
-            logging.warning("No closing prices to compose the portfolio.")
-            return pd.Series(dtype=float)
-
-        w = pd.Series(self.weights)
-        weighted = adj_close.mul(w, axis=1)
-        return weighted.sum(axis=1)
-
-    def getReturns(self):
-        """
-        Daily returns of each stock (pct_change) + 'Portfolio' column.
-        """
-        prices = self.getAdjClosePrices()
-        if prices.empty:
-            logging.warning("No price data to calculate returns.")
-            return pd.DataFrame()
-
-        stock_returns = prices.pct_change()
-        p_return_series = self.getPortfolioReturns()
-        stock_returns["Portfolio"] = p_return_series
-        return stock_returns
-
-    def getAdjustedReturns(self):
-        """
-        If any stock has adjusted returns, merges everything and does a dot with weights
-        to get the portfolio return series.
+        Returns a DataFrame: columns = stock symbols; rows = daily 'Adj Close' prices.
         """
         df = pd.DataFrame()
         for st in self.stocks.values():
-            r = st.getAdjustedReturns()
+            c = st.getClose()
+            if not c.empty:
+                df[st.symbol] = c
+        return df
+
+    def getPortfolioAdjustedClosePrices(self):
+        """
+        Weighted sum of 'Adj Close' if we had a constant buy-and-hold 
+        portfolio (for reference).
+        """
+        adj_close = self.getAdjClosePrices()
+        if adj_close.empty:
+            return pd.Series(dtype=float)
+        w_ = pd.Series(self.weights)
+        return adj_close.mul(w_, axis=1).sum(axis=1)
+
+    def getReturns(self):
+        """
+        Daily returns for each symbol (pct_change), plus 'Portfolio' column.
+        """
+        prices = self.getAdjClosePrices()
+        if prices.empty:
+            return pd.DataFrame()
+
+        rets = prices.pct_change()
+        rets["Portfolio"] = self.getPortfolioReturns()
+        return rets
+
+    def getAdjustedReturns(self):
+        """
+        Uses each stock's getAdjustedReturns() (either historical or synthetic)
+        then constructs a weighted portfolio return series (ignoring uninvested cash).
+        """
+        df = pd.DataFrame()
+        for st in self.stocks.values():
+            r = st.getAdjustedReturns().dropna()
             if not r.empty:
                 df[st.symbol] = r
+
         if df.empty:
-            logging.warning("No adjusted returns for the portfolio.")
             return pd.Series(dtype=float)
 
-        w = pd.Series(self.weights)
-        return df.dot(w)
+        # Only keep weights for symbols that appear in df
+        valid_w = {
+            sym: self.weights[sym] 
+            for sym in df.columns if sym in self.weights
+        }
+        if not valid_w:
+            return pd.Series(dtype=float)
+
+        w_s = pd.Series(valid_w)
+        portfolio_r = df.dot(w_s)
+        return portfolio_r
 
     def getPortfolioReturns(self):
         """
-        Daily returns for the portfolio (cached if already calculated).
+        Cached daily returns of the stock portion (weighted sum).
         """
         if self.portfolio_returns is not None:
             return self.portfolio_returns
-
-        r = self.getAdjustedReturns()
-        if r.empty:
-            self.portfolio_returns = pd.Series(dtype=float)
-            return self.portfolio_returns
-
-        self.portfolio_returns = r
-        return self.portfolio_returns
+        series = self.getAdjustedReturns().dropna()
+        self.portfolio_returns = series
+        return series
 
     def getPortfolioExcessReturns(self):
         """
-        Portfolio return - daily risk-free rate.
+        Portfolio returns minus the daily risk-free rate.
         """
         if self.portfolio_excess_returns is not None:
             return self.portfolio_excess_returns
@@ -165,96 +184,143 @@ class Portfolio:
             self.portfolio_excess_returns = pd.Series(dtype=float)
             return self.portfolio_excess_returns
 
-        daily_rf = (1 + self.RF) ** (1/252) - 1
+        daily_rf = (1 + self.RF)**(1/252) - 1
         self.portfolio_excess_returns = pr - daily_rf
         return self.portfolio_excess_returns
 
     def getPortfolioSharpe(self):
+        """
+        Annualized Sharpe ratio (mean of daily excess returns / std dev).
+        """
         er = self.getPortfolioExcessReturns().dropna()
+        if er.empty:
+            return np.nan
         std_dev = er.std()
         if std_dev == 0 or np.isnan(std_dev):
             return np.nan
-        return er.mean() / std_dev * np.sqrt(252)
+        return (er.mean() / std_dev) * np.sqrt(252)
 
     def getPortfolioSortino(self):
+        """
+        Annualized Sortino ratio = mean of daily excess returns / std of negative returns.
+        """
         er = self.getPortfolioExcessReturns().dropna()
-        negative = er[er < 0]
-        if negative.empty or negative.std() == 0:
+        if er.empty:
             return np.nan
-        return er.mean() / negative.std() * np.sqrt(252)
+        neg = er[er < 0]
+        if neg.empty or neg.std() == 0:
+            return np.nan
+        return (er.mean() / neg.std()) * np.sqrt(252)
 
     def getPortfolioStdDev(self):
-        rr = self.getPortfolioReturns().dropna()
-        if rr.empty:
+        """
+        Annualized standard deviation of the stock portion's daily returns.
+        """
+        r = self.getPortfolioReturns().dropna()
+        if r.empty:
             return np.nan
-        return rr.std() * np.sqrt(252)
+        return r.std() * np.sqrt(252)
+
+    def getMaxDrawdown(self):
+        """
+        Max drawdown in the stock portion's daily returns (cumulative).
+        """
+        r = self.getPortfolioReturns().dropna()
+        if r.empty:
+            return np.nan
+        cum = (1 + r).cumprod()
+        peak = cum.expanding().max()
+        dd = (cum / peak) - 1
+        return dd.min()
+
+    def getVaR(self, cl=0.05):
+        """
+        Value-at-Risk at the specified confidence level (e.g. 0.05=5%).
+        """
+        r = self.getPortfolioReturns().dropna()
+        if r.empty:
+            return np.nan
+        return np.percentile(r, cl * 100)
+
+    def getCVaR(self, cl=0.05):
+        """
+        Conditional VaR (aka Expected Shortfall) at e.g. 5% tail.
+        """
+        r = self.getPortfolioReturns().dropna()
+        if r.empty:
+            return np.nan
+        var_ = self.getVaR(cl)
+        return r[r <= var_].mean()
 
     def getPortfolioCovarianceMatrix(self):
         """
-        Covariance matrix of the daily returns of each stock.
+        Covariance matrix of daily returns for each stock in the portfolio.
         """
         df = pd.DataFrame()
         for st in self.stocks.values():
-            r = st.getAdjustedReturns()
-            if not r.empty:
-                df[st.symbol] = r
-        df.dropna(inplace=True)
+            ret = st.getAdjustedReturns().dropna()
+            if not ret.empty:
+                df[st.symbol] = ret
         if df.empty:
             return pd.DataFrame()
+        df = df.dropna(how='all')
         return df.cov()
 
     def getCorrelationMatrix(self):
         """
-        Correlation matrix of the daily returns of each stock.
+        Correlation matrix of daily returns for each stock in the portfolio.
         """
         df = pd.DataFrame()
         for st in self.stocks.values():
-            r = st.getAdjustedReturns()
-            if not r.empty:
-                df[st.symbol] = r
-        df.dropna(inplace=True)
+            ret = st.getAdjustedReturns().dropna()
+            if not ret.empty:
+                df[st.symbol] = ret
         if df.empty:
             return pd.DataFrame()
+        df = df.dropna(how='all')
         return df.corr()
 
     def getMarginalContributionToRisk(self):
         """
-        Marginal Contribution to Risk of each asset, based on covariance.
+        MCTR for each stock: partial derivative of portfolio volatility 
+        w.r.t. that stock's weight.
         """
         cov = self.getPortfolioCovarianceMatrix()
         if cov.empty:
             return pd.Series(dtype=float)
-        w = np.array([self.weights[sym] for sym in self.stocks])
-        port_daily_vol = self.getPortfolioStdDev() / np.sqrt(252)
-        if port_daily_vol == 0 or np.isnan(port_daily_vol):
+        w = np.array([self.weights.get(c, 0) for c in cov.columns])
+        port_vol_daily = self.getPortfolioStdDev() / np.sqrt(252)
+        if port_vol_daily == 0 or np.isnan(port_vol_daily):
             return pd.Series(dtype=float)
-        mctr_ = cov.dot(w) / port_daily_vol
-        return pd.Series(mctr_, index=self.stocks.keys())
+        mctr_ = cov.dot(w) / port_vol_daily
+        return pd.Series(mctr_, index=cov.columns)
 
     def getComponentContributionToRisk(self):
         """
-        Contribution to Risk = Weight * Marginal Contribution to Risk
+        CCTR: each stock's weight * that stock's MCTR, i.e. fraction of total risk.
         """
         mctr = self.getMarginalContributionToRisk()
         w_s = pd.Series(self.weights)
-        return w_s * mctr
+        return w_s[mctr.index] * mctr
 
     def simulatePortfolioWithoutAsset(self, symbol):
         """
-        Simulates the portfolio's volatility by removing an asset.
+        Hypothetical scenario removing 'symbol' from the portfolio 
+        to see how volatility changes.
         """
-        if symbol not in self.weights:
+        if symbol not in self.stocks:
             return np.nan
         new_stocks = {s: obj for s, obj in self.stocks.items() if s != symbol}
         if not new_stocks:
             return np.nan
+        # Build a test portfolio ignoring that asset:
         from ClassPortfolio import Portfolio
-        testp = Portfolio(new_stocks, self.RF, self.cash_balance)
-        return testp.getPortfolioStdDev()
+        test_p = Portfolio(new_stocks, self.RF, self.cash_balance)
+        return test_p.getPortfolioStdDev()
 
     def getAssetImpactOnVolatility(self, symbol):
         """
-        The difference in the portfolio's volatility when removing an asset.
+        Return how removing 'symbol' changes the portfolio's std dev.
         """
         orig = self.getPortfolioStdDev()
         new_ = self.simulatePortfolioWithoutAsset(symbol)
@@ -262,42 +328,17 @@ class Portfolio:
             return np.nan
         return orig - new_
 
-    def getMaxDrawdown(self):
-        pr = self.getPortfolioReturns().dropna()
-        if pr.empty:
-            return np.nan
-        cum = (1 + pr).cumprod()
-        peak = cum.expanding().max()
-        dd = (cum / peak) - 1
-        return dd.min()
-
-    def getVaR(self, cl=0.05):
-        """
-        Value at Risk based on the percentile.
-        """
-        pr = self.getPortfolioReturns().dropna()
-        if pr.empty:
-            return np.nan
-        return np.percentile(pr, cl * 100)
-
-    def getCVaR(self, cl=0.05):
-        """
-        Conditional VaR (ES).
-        """
-        pr = self.getPortfolioReturns().dropna()
-        if pr.empty:
-            return np.nan
-        var_ = self.getVaR(cl)
-        return pr[pr <= var_].mean()
-
     def getMarketData(self, symbol='^GSPC'):
         """
-        Downloads the market index to calculate Beta.
+        Download market index data (e.g. S&P500) to estimate portfolio Beta.
         """
-        end_ = datetime.today()
+        if getattr(self, 'market_close', None) is not None and not self.market_close.empty:
+            return self.market_close
+        end_ = pd.Timestamp.today().floor('D')
         start_ = end_ - timedelta(days=365)
         try:
-            df = yf.download(symbol, start=start_, end=end_, interval='1d', progress=False, auto_adjust=False)
+            df = yf.download(symbol, start=start_, end=end_, interval='1d',
+                             progress=False, auto_adjust=False)
             if df.empty:
                 self.market_close = pd.Series(dtype=float)
             else:
@@ -311,28 +352,36 @@ class Portfolio:
 
     def getMarketReturns(self):
         """
-        Daily returns of the market (e.g.: ^GSPC).
+        Daily returns of the market index (e.g. S&P500).
         """
-        if self.market_close is None:
-            self.getMarketData()
-        if self.market_close.empty:
+        m = self.getMarketData()
+        if m.empty:
             return pd.Series(dtype=float)
-        return self.market_close.pct_change()
+        return m.pct_change()
 
     def getPortfolioBeta(self):
+        """
+        Beta vs. the market, via covariance/variance ratio of daily returns.
+        """
         pr = self.getPortfolioReturns().dropna()
-        mr = self.getMarketReturns().loc[pr.index].dropna()
-        df = pd.DataFrame({'p': pr, 'm': mr}).dropna()
+        mr_full = self.getMarketReturns()
+        if pr.empty or mr_full.empty:
+            return np.nan
+        mr = mr_full.reindex(pr.index)
+        df = pd.DataFrame({"p": pr, "m": mr}).dropna()
         if df.empty:
             return np.nan
-        c = np.cov(df['p'], df['m'])
-        pm = c[0][1]
-        mm = c[1][1]
+        c = np.cov(df["p"], df["m"])
+        pm = c[0,1]
+        mm = c[1,1]
         if mm == 0:
             return np.nan
         return pm / mm
 
     def getTreynorRatio(self):
+        """
+        (Annualized portfolio return - RF) / Beta
+        """
         b = self.getPortfolioBeta()
         if b == 0 or np.isnan(b):
             return np.nan
@@ -341,55 +390,71 @@ class Portfolio:
 
     def getDetailedStockData(self):
         """
-        Creates a DataFrame with detailed statistics for each stock in the portfolio.
+        Returns a DataFrame with stock-level stats (Beta, Sharpe, etc.),
+        plus 'danger' flags if certain thresholds are exceeded.
         """
         rows = []
+        mctr = self.getMarginalContributionToRisk()
+        cctr = self.getComponentContributionToRisk()
+
         for st in tqdm(self.stocks.values(), desc="Processing stocks"):
             sym = st.symbol
             beta = st.getBeta()
-            sharpe = st.getSharpeRatio()
-            sortino = st.getSortinoRatio()
+            sharpe_ = st.getSharpeRatio()
+            sortino_ = st.getSortinoRatio()
             impact = self.getAssetImpactOnVolatility(sym)
-            mctr = self.getMarginalContributionToRisk().get(sym, np.nan)
-            ctr = self.getComponentContributionToRisk().get(sym, np.nan)
+            mc = mctr.get(sym, np.nan)
+            cc = cctr.get(sym, np.nan)
 
-            try:
-                c = st.getClose()
-                cur_price = c.iloc[-1] if not c.empty else np.nan
-                hi52 = c.max() if not c.empty else np.nan
-                lo52 = c.min() if not c.empty else np.nan
-            except:
-                cur_price = hi52 = lo52 = np.nan
+            c = st.getClose()
+            if c.empty:
+                cur_price = np.nan
+                hi52 = np.nan
+                lo52 = np.nan
+            else:
+                cur_price = c.iloc[-1]
+                hi52 = c.max()
+                lo52 = c.min()
 
-            tot_ret = st.getTotalReturn()
-            beta_danger = abs(beta) > 1.5 if not np.isnan(beta) else False
-            sharpe_danger = sharpe < 1 if not np.isnan(sharpe) else False
-            sortino_danger = sortino < 1 if not np.isnan(sortino) else False
+            total_ret = st.getTotalReturn()
+
+            # Danger flags
+            beta_danger = (abs(beta) > 1.5) if not np.isnan(beta) else False
+            sharpe_danger = (sharpe_ < 1) if not np.isnan(sharpe_) else False
+            sortino_danger = (sortino_ < 1) if not np.isnan(sortino_) else False
 
             rows.append({
                 "Stock": sym,
-                "Weight %": round(self.weights.get(sym, 0) * 100, 2),
-                "Value $": round(st.getAmount(), 2),
-                "Current Price": round(cur_price, 2) if not np.isnan(cur_price) else "N/A",
-                "52-Week High": round(hi52, 2) if not np.isnan(hi52) else "N/A",
-                "52-Week Low": round(lo52, 2) if not np.isnan(lo52) else "N/A",
-                "Total Return %": round(tot_ret * 100, 2) if not np.isnan(tot_ret) else "N/A",
+                "Weight %": round(self.weights.get(sym,0)*100,2),
+                "Value $": round(st.value,2),
+                "Current Price": round(cur_price,2) if not np.isnan(cur_price) else "N/A",
+                "52-Week High": round(hi52,2) if not np.isnan(hi52) else "N/A",
+                "52-Week Low": round(lo52,2) if not np.isnan(lo52) else "N/A",
+                "Total Return %": round(total_ret*100,2) if not np.isnan(total_ret) else "N/A",
                 "Beta": round(beta,4) if not np.isnan(beta) else "N/A",
                 "Beta Danger": "Yes" if beta_danger else "No",
-                "Sharpe": round(sharpe,4) if not np.isnan(sharpe) else "N/A",
+                "Sharpe": round(sharpe_,4) if not np.isnan(sharpe_) else "N/A",
                 "Sharpe Danger": "Yes" if sharpe_danger else "No",
-                "Sortino": round(sortino,4) if not np.isnan(sortino) else "N/A",
+                "Sortino": round(sortino_,4) if not np.isnan(sortino_) else "N/A",
                 "Sortino Danger": "Yes" if sortino_danger else "No",
                 "Volatility Impact": round(impact,4) if not np.isnan(impact) else "N/A",
-                "Contribution to Risk": round(ctr,6) if not np.isnan(ctr) else "N/A"
+                "Marginal CTR": round(mc,6) if not np.isnan(mc) else "N/A",
+                "Component CTR": round(cc,6) if not np.isnan(cc) else "N/A"
             })
+
         return pd.DataFrame(rows)
 
     def Summary(self):
         """
-        Returns a dictionary with aggregate portfolio metrics (Sharpe, Sortino, Beta, etc.).
+        Dictionary summarizing portfolio-level stats + 'danger' flags.
+
+        Now includes self.cash_balance in the final "Portfolio Value."
         """
-        val = sum(st.getAmount() for st in self.stocks.values())
+        # 1) Sum all stocks
+        stock_value = sum(st.value for st in self.stocks.values())
+        # 2) Add uninvested cash
+        total_value = stock_value + self.cash_balance
+
         stdv = self.getPortfolioStdDev()
         sh = self.getPortfolioSharpe()
         so = self.getPortfolioSortino()
@@ -407,119 +472,145 @@ class Portfolio:
         cvar_danger = (cvar95 < -0.05) if not np.isnan(cvar95) else False
 
         return {
-            "Portfolio Value": round(val,2),
-            "Portfolio StdDev": round(stdv,4) if not np.isnan(stdv) else "N/A",
-            "Portfolio Sharpe": round(sh,4) if not np.isnan(sh) else "N/A",
+            "Portfolio Value": round(total_value, 2),  # <== includes cash now
+            "Portfolio StdDev": round(stdv, 4) if not np.isnan(stdv) else "N/A",
+            "Portfolio Sharpe": round(sh, 4) if not np.isnan(sh) else "N/A",
             "Sharpe Danger": "Yes" if sharpe_danger else "No",
-            "Portfolio Sortino": round(so,4) if not np.isnan(so) else "N/A",
+            "Portfolio Sortino": round(so, 4) if not np.isnan(so) else "N/A",
             "Sortino Danger": "Yes" if sortino_danger else "No",
-            "Portfolio Beta": round(be,4) if not np.isnan(be) else "N/A",
+            "Portfolio Beta": round(be, 4) if not np.isnan(be) else "N/A",
             "Beta Danger": "Yes" if beta_danger else "No",
-            "Portfolio Treynor": round(tr,4) if not np.isnan(tr) else "N/A",
-            "Max Drawdown": round(dd,4) if not np.isnan(dd) else "N/A",
+            "Portfolio Treynor": round(tr, 4) if not np.isnan(tr) else "N/A",
+            "Max Drawdown": round(dd, 4) if not np.isnan(dd) else "N/A",
             "Max Drawdown Danger": "Yes" if dd_danger else "No",
-            "VaR 95%": round(var95,4) if not np.isnan(var95) else "N/A",
+            "VaR 95%": round(var95, 4) if not np.isnan(var95) else "N/A",
             "VaR Danger": "Yes" if var_danger else "No",
-            "CVaR 95%": round(cvar95,4) if not np.isnan(cvar95) else "N/A",
+            "CVaR 95%": round(cvar95, 4) if not np.isnan(cvar95) else "N/A",
             "CVaR Danger": "Yes" if cvar_danger else "No"
         }
 
     def getDynamicTimeSeries(self, transaction_log=None, by_stock=False):
         """
-        Returns a DataFrame with columns:
-          Date, Cash, [Stock1, Stock2, ... if by_stock=True], PortfolioValue
-        applying each transaction in chronological order.
+        Rebuilds the portfolio's daily value from the transaction history,
+        applying transactions as-of their date. This lets weekend/holiday
+        buys/sells 'take effect' on the next trading day.
         """
         if transaction_log is None or transaction_log.empty:
-            logging.warning("No transaction_log or it is empty.")
+            logging.warning("No transaction log for dynamic series.")
             return pd.DataFrame()
 
         prices_df = self.getAdjClosePrices()
         if prices_df.empty:
-            logging.warning("No prices to generate a dynamic time series.")
+            logging.warning("No prices to generate dynamic time series.")
             return pd.DataFrame()
 
-        all_dates = prices_df.index.sort_values().unique()
-        transaction_log = transaction_log.sort_values("Date")
+        # Sort the transaction log by date
+        transaction_log = transaction_log.sort_values("Date").reset_index(drop=True)
 
-        if not pd.api.types.is_datetime64_any_dtype(transaction_log["Date"]):
-            transaction_log["Date"] = pd.to_datetime(transaction_log["Date"])
+        # Create a boolean column to mark which transactions have been used
+        transaction_log["Used"] = False
+
+        all_dates = prices_df.index.sort_values().unique()
+
+        # Start all holdings at zero, plus the initial cash
+        current_holdings = {sym: 0 for sym in self.stocks.keys()}
+        current_cash = self.cash_balance
 
         portfolio_values = []
-        current_cash = self.cash_balance
-        current_holdings = {}
-        for sym, st in self.stocks.items():
-            current_holdings[sym] = st.quantity
 
         for day in all_dates:
-            day_txs = transaction_log[transaction_log["Date"] == day]
+            # Grab all not-yet-used transactions with Date <= this day
+            mask = (transaction_log["Date"] <= day) & (transaction_log["Used"] == False)
+            day_txs = transaction_log.loc[mask]
 
-            for _, tx in day_txs.iterrows():
+            # Apply each transaction
+            for idx, tx in day_txs.iterrows():
                 ttype = tx["Type"].lower()
                 tsym = tx["Symbol"]
                 qty = tx["Quantity"]
                 px = tx["Price"]
 
-                if ttype == 'buy':
+                if ttype == "buy":
                     cost = qty * px
                     if current_cash < cost:
                         logging.error("Not enough cash to buy.")
                         continue
                     current_cash -= cost
-                    current_holdings[tsym] = current_holdings.get(tsym, 0.0) + qty
-                elif ttype == 'sell':
-                    if current_holdings.get(tsym, 0.0) < qty:
+                    current_holdings[tsym] = current_holdings.get(tsym, 0) + qty
+
+                elif ttype == "sell":
+                    if current_holdings.get(tsym, 0) < qty:
                         logging.error("Not enough shares to sell.")
                         continue
                     revenue = qty * px
                     current_cash += revenue
                     current_holdings[tsym] -= qty
                     if current_holdings[tsym] <= 0:
-                        del current_holdings[tsym]
+                        current_holdings[tsym] = 0
 
-            day_val = current_cash
+                # Mark transaction as used
+                transaction_log.at[idx, "Used"] = True
+
+            # Now compute portfolio value for this day
             row_dict = {"Date": day, "Cash": current_cash}
-            for s_, q_ in current_holdings.items():
-                if s_ not in prices_df.columns:
-                    continue
-                if day not in prices_df.index:
-                    continue
-                px_today = prices_df.loc[day, s_]
-                stock_val = q_ * px_today
-                day_val += stock_val
-                if by_stock:
-                    row_dict[s_] = stock_val
+            day_val = current_cash
+
+            if by_stock:
+                # If user wants each stock's daily value in a separate column
+                for sym_ in self.stocks.keys():
+                    if sym_ in prices_df.columns:
+                        px_today = prices_df.loc[day, sym_]
+                        shares_ = current_holdings[sym_]
+                        if shares_ > 0:
+                            val_ = shares_ * px_today
+                            day_val += val_
+                            row_dict[sym_] = val_
+                        else:
+                            row_dict[sym_] = np.nan
+            else:
+                # Only track total (stocks + cash)
+                for sym_ in current_holdings:
+                    sh_ = current_holdings[sym_]
+                    if sh_ > 0 and sym_ in prices_df.columns:
+                        px_today = prices_df.loc[day, sym_]
+                        day_val += sh_ * px_today
 
             row_dict["PortfolioValue"] = day_val
             portfolio_values.append(row_dict)
 
-        dyn_df = pd.DataFrame(portfolio_values)
-        dyn_df.sort_values("Date", inplace=True)
+        dyn_df = pd.DataFrame(portfolio_values).sort_values("Date")
         dyn_df.reset_index(drop=True, inplace=True)
+
+        # Optionally store it if you want to reference it in Summary
+        self._dynamic_ts = dyn_df.copy()
+
         return dyn_df
 
     def monteCarloSimulation(self, num_simulations=1000, num_days=252):
         """
-        Monte Carlo simulation at the portfolio level using GBM from the distribution of daily returns.
+        GBM-based Monte Carlo simulation on the stock portion's daily returns.
+        (Ignoring uninvested cash for the return process.)
         """
         portfolio_returns = self.getPortfolioReturns().dropna()
         if portfolio_returns.empty:
-            logging.warning("No portfolio returns for MC.")
+            logging.warning("No portfolio returns for Monte Carlo.")
             return pd.DataFrame()
 
         mean_ret = portfolio_returns.mean()
         std_dev = portfolio_returns.std()
-        drift = mean_ret - 0.5 * (std_dev ** 2)
+        drift = mean_ret - 0.5*(std_dev**2)
         dt = 1 / 252
-        last_port_val = sum(st.getAmount() for st in self.stocks.values())
+
+        # Just use the sum of current stock values + cash as the start
+        last_port_val = sum(st.value for st in self.stocks.values()) + self.cash_balance
 
         sim_array = np.zeros((num_days, num_simulations))
         for i in range(num_simulations):
             np.random.seed(i)
             shocks = np.random.normal(0, std_dev, num_days)
-            daily_ret = np.exp(drift * dt + shocks)
-            port_path = last_port_val * np.cumprod(daily_ret)
-            sim_array[:, i] = port_path
+            daily_ret = np.exp(drift*dt + shocks)
+            path = last_port_val * np.cumprod(daily_ret)
+            sim_array[:, i] = path
 
         if len(portfolio_returns.index) == 0:
             last_date = datetime.today()
@@ -528,18 +619,18 @@ class Portfolio:
         future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=num_days)
 
         sim_df = pd.DataFrame(
-            sim_array,
+            sim_array, 
             index=future_dates,
             columns=[f"Simulation_{i+1}" for i in range(num_simulations)]
         )
         self.simulated_portfolio_values = sim_df
 
-        # Compute metrics
+        # Basic metrics per simulation
         ret_ = sim_df.pct_change().dropna(how='all')
         sharpe_ = ret_.mean(axis=0) / ret_.std(axis=0) * np.sqrt(252)
-        negative_only = ret_[ret_ < 0]
-        sortino_ = ret_.mean(axis=0) / negative_only.std(axis=0) * np.sqrt(252)
-        mdd_ = sim_df.apply(lambda x: self.calculate_max_drawdown(x), axis=0)
+        neg_only = ret_[ret_ < 0]
+        sortino_ = ret_.mean(axis=0) / neg_only.std(axis=0) * np.sqrt(252)
+        mdd_ = sim_df.apply(self.calculate_max_drawdown, axis=0)
         var_ = ret_.quantile(0.05, axis=0)
         cvar_ = ret_.apply(lambda x: x[x <= x.quantile(0.05)].mean(), axis=0)
 
@@ -555,6 +646,10 @@ class Portfolio:
 
     @staticmethod
     def calculate_max_drawdown(series):
+        """
+        Max drawdown for a price series: 
+        the lowest (cumprod / peak) - 1 across the entire timeframe.
+        """
         cumret = (1 + series.pct_change()).cumprod()
         peak = cumret.expanding().max()
         dd = (cumret / peak) - 1
@@ -562,7 +657,7 @@ class Portfolio:
 
     def getSimulatedMetrics(self):
         """
-        Returns the simulation metrics (Monte Carlo) of the portfolio.
+        Returns the DataFrame with Monte Carlo simulation metrics if available.
         """
         if self.simulated_metrics is None:
             return pd.DataFrame()
