@@ -14,7 +14,7 @@ jobs:
       - name: Checkout do repositório
         uses: actions/checkout@v4
         with:
-          persist-credentials: false
+          persist-credentials: true
 
       - name: Configurar usuário Git
         run: |
@@ -26,4 +26,4 @@ jobs:
           git pull origin main --rebase
           git add main.py ClassPortfolio.py ClassStock.py ClassTransactions.py git_push.bat install_requirements.py utils.py
           git commit -m "Auto commit via GitHub Actions" || echo "Nada para commitar"
-          git push https://${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git main
+          git push origin main
