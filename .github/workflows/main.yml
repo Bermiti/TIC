@@ -3,9 +3,9 @@ name: Auto Git Sync
 on:
   push:
     branches:
-      - main  # Executa sempre que houver alterações na branch main
+      - dev  # Só escuta alterações na dev (não main!)
   schedule:
-    - cron: "*/10 * * * *"  # Executa a cada 10 minutos
+    - cron: "0 13 * * 1-5"  # Corre às 13:00 UTC (ex: antes do mercado americano)
 
 jobs:
   sync:
@@ -13,19 +13,16 @@ jobs:
     steps:
       - name: Checkout do repositório
         uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v4
         with:
-          persist-credentials: false
+          python-version: '3.10'
 
-      - name: Configurar usuário Git
+      - name: Instalar dependências
         run: |
-          git config --global user.name "github-actions"
-          git config --global user.email "github-actions@github.com"
+          pip install -r requirements.txt
 
-      - name: Atualizar repositório e sincronizar arquivos específicos
-        env:
-          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+      - name: Executar o main.py
         run: |
-          git pull origin main --rebase
-          git add main.py ClassPortfolio.py ClassStock.py ClassTransactions.py git_push.bat install_requirements.py utils.py
-          git commit -m "Auto commit via GitHub Actions" || echo "Nada para commitar"
-          git push https://$PAT_TOKEN@github.com/${{ github.repository }}.git main
+          python main.py
